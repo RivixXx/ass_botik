@@ -1,4 +1,14 @@
-export default function register(bot, { prisma }) {
+import { validateEmployeeData } from './employee.validator.js';
+
+export default function register(bot, { prisma, logger }) {
+  // Получаем logger или создаем заглушку
+  const log = logger || {
+    error: (...args) => console.error(...args),
+    warn: (...args) => console.warn(...args),
+    info: (...args) => console.log(...args),
+    debug: (...args) => console.log(...args)
+  };
+
   // Команда просмотра сотрудников
   bot.command('employees', async (ctx) => {
     try {
@@ -6,7 +16,9 @@ export default function register(bot, { prisma }) {
         orderBy: { lastName: 'asc' },
       });
 
-      if (!employees.length) return ctx.reply('Список сотрудников пуст.');
+      if (!employees.length) {
+        return ctx.reply('Список сотрудников пуст.');
+      }
 
       const message = employees.map(emp => {
         let s = `${emp.firstName} ${emp.lastName}`;
@@ -16,33 +28,117 @@ export default function register(bot, { prisma }) {
         return s;
       }).join('\n');
 
-      ctx.reply(message);
+      await ctx.reply(message);
     } catch (err) {
-      console.error(err);
-      ctx.reply('Ошибка при получении списка сотрудников.');
+      log.error({ err, userId: ctx.from?.id }, 'Error fetching employees list');
+      await ctx.reply('Ошибка при получении списка сотрудников. Попробуйте позже.');
     }
   });
 
   // Команда добавления сотрудника
   bot.command('addemployee', async (ctx) => {
-    const args = ctx.message.text.split(' ').slice(1);
-    if (!args.length) return ctx.reply('Использование: /addemployee Имя Фамилия [Должность] [Подразделение]');
-
-    const firstName = args[0];
-    const lastName = args[1] || '';
-    const position = args[2] || null;
-    const department = args.slice(3).join(' ') || null;
-
     try {
-      await prisma.employee.create({
-        data: { firstName, lastName, position, department },
+      const args = ctx.message.text.split(' ').slice(1);
+      
+      if (!args.length || args.length < 2) {
+        return ctx.reply(
+          'Использование: /addemployee Имя Фамилия [Email] [Телефон] [Должность] [Подразделение]\n\n' +
+          'Примеры:\n' +
+          '/addemployee Иван Петров\n' +
+          '/addemployee Иван Петров ivan@example.com\n' +
+          '/addemployee Иван Петров ivan@example.com +79001234567 Бухгалтер Бухгалтерия'
+        );
+      }
+
+      const firstName = args[0].trim();
+      const lastName = args[1].trim();
+      
+      // Остальные аргументы могут быть email, телефон, должность, подразделение
+      // Пытаемся определить, что есть что
+      let email = null;
+      let phone = null;
+      let position = null;
+      let department = null;
+      
+      const remainingArgs = args.slice(2);
+      
+      // Email обычно содержит @
+      const emailIndex = remainingArgs.findIndex(arg => arg.includes('@'));
+      if (emailIndex !== -1) {
+        email = remainingArgs[emailIndex];
+        remainingArgs.splice(emailIndex, 1);
+      }
+      
+      // Телефон обычно содержит цифры и начинается с + или 8
+      const phoneIndex = remainingArgs.findIndex(arg => /^[\d+][\d\s()-]{6,}$/.test(arg));
+      if (phoneIndex !== -1) {
+        phone = remainingArgs[phoneIndex];
+        remainingArgs.splice(phoneIndex, 1);
+      }
+      
+      // Остальное: должность и подразделение
+      if (remainingArgs.length > 0) {
+        position = remainingArgs[0] || null;
+        if (remainingArgs.length > 1) {
+          department = remainingArgs.slice(1).join(' ') || null;
+        }
+      }
+
+      // Валидация данных
+      const validation = validateEmployeeData({
+        firstName,
+        lastName,
+        email: email || null,
+        phone: phone || null,
+        birthdayDay: null,
+        birthdayMonth: null
       });
-      ctx.reply(`Сотрудник "${firstName} ${lastName}" добавлен.`);
+
+      if (!validation.valid) {
+        const errorMessage = 'Ошибка валидации данных:\n' + validation.errors.join('\n');
+        log.warn({ validation, userId: ctx.from?.id }, 'Employee data validation failed');
+        return ctx.reply(errorMessage);
+      }
+
+      // Проверка на существование сотрудника с таким email (если email указан)
+      if (email) {
+        const existing = await prisma.employee.findFirst({
+          where: { email: { equals: email, mode: 'insensitive' } }
+        });
+        if (existing) {
+          log.warn({ email, userId: ctx.from?.id }, 'Attempt to add employee with existing email');
+          return ctx.reply(`Сотрудник с email ${email} уже существует.`);
+        }
+      }
+
+      // Создание сотрудника
+      const employee = await prisma.employee.create({
+        data: {
+          firstName,
+          lastName,
+          email: email || null,
+          phone: phone || null,
+          position: position || null,
+          department: department || null
+        },
+      });
+
+      log.info({ employeeId: employee.id, userId: ctx.from?.id }, 'Employee created successfully');
+      await ctx.reply(`✅ Сотрудник "${firstName} ${lastName}" успешно добавлен.`);
+      
     } catch (err) {
-      console.error(err);
-      ctx.reply('Ошибка при добавлении сотрудника.');
+      // Обработка специфичных ошибок Prisma
+      if (err.code === 'P2002') {
+        // Уникальное ограничение нарушено
+        const field = err.meta?.target?.[0] || 'данные';
+        log.warn({ err, userId: ctx.from?.id }, `Duplicate employee data: ${field}`);
+        await ctx.reply(`❌ Сотрудник с такими ${field === 'email' ? 'email' : 'данными'} уже существует.`);
+      } else {
+        log.error({ err, userId: ctx.from?.id }, 'Error adding employee');
+        await ctx.reply('❌ Ошибка при добавлении сотрудника. Проверьте данные и попробуйте снова.');
+      }
     }
   });
 
-  console.log('Employees plugin loaded');
+  log.info('Employees plugin loaded');
 }

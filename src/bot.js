@@ -38,7 +38,7 @@ function ensureHistory(ctx) {
 }
 
 // Подключаем плагины
-employeesPlugin(bot, { prisma });
+employeesPlugin(bot, { prisma, logger });
 
 // Команды
 bot.start((ctx) => ctx.reply('Привет! Я бот компании "Навикон". Задай вопрос — я помогу.'));
