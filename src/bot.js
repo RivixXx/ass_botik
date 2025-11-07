@@ -6,8 +6,6 @@ import pino from 'pino';
 
 import employeesPlugin from './plugins/employees/index.js';
 
-employeesPlugin(bot, { prisma });
-
 // Логгер
 const logger = pino({ level: process.env.LOG_LEVEL || 'info' });
 
@@ -41,6 +39,9 @@ function ensureHistory(ctx) {
   ctx.session = ctx.session || {};
   if (!Array.isArray(ctx.session.history)) ctx.session.history = [];
 }
+
+// Подключаем плагины
+employeesPlugin(bot, { prisma });
 
 // Команды
 bot.start((ctx) => {
