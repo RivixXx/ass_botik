@@ -2,6 +2,10 @@
 import prisma from "../../db/prismaClient.js";
 import { isEmployeeQuery, extractNameFromText, extractEmailFromText } from "./employee-query-detector.js";
 import { findEmployeeCaseInsensitive, findByNameTokenCaseInsensitive } from "./employee-search-helper.js";
+import cache from "../../utils/cache.js";
+import pino from "pino";
+
+const logger = pino({ level: process.env.LOG_LEVEL || 'info' });
 
 /**
  * Формат ответа: { handled: boolean, text: string }
@@ -33,6 +37,13 @@ export async function handleEmployeeQuery(text) {
     text = String(text || "").trim();
     if (!text) return { handled: false, text: "" };
 
+    // Проверка кэша
+    const cacheKey = `employee_query:${text.toLowerCase().trim()}`;
+    const cached = cache.get(cacheKey);
+    if (cached) {
+      return cached;
+    }
+
     // Быстрая проверка: если запрос точно не о сотрудниках, сразу возвращаем
     if (!isEmployeeQuery(text)) {
       return { handled: false, text: "" };
@@ -47,15 +58,21 @@ export async function handleEmployeeQuery(text) {
   // 1) Прямые запросы по должности: "кто главный бухгалтер", "кто директор"
   if (low.includes("главный бухгалтер") || low.includes("главбух")) {
     const emp = await findEmployeeCaseInsensitive({ position: "главный бухгалтер" });
-    return emp ? { handled: true, text: formatEmployeeInfo(emp) } : { handled: true, text: "Сотрудник не найден." };
+    const result = emp ? { handled: true, text: formatEmployeeInfo(emp) } : { handled: true, text: "Сотрудник не найден." };
+    cache.set(cacheKey, result);
+    return result;
   }
   if (low.includes("директор")) {
     const emp = await findEmployeeCaseInsensitive({ position: "директор" });
-    return emp ? { handled: true, text: formatEmployeeInfo(emp) } : { handled: true, text: "Сотрудник не найден." };
+    const result = emp ? { handled: true, text: formatEmployeeInfo(emp) } : { handled: true, text: "Сотрудник не найден." };
+    cache.set(cacheKey, result);
+    return result;
   }
   if (low.includes("руководитель") && low.includes("тех")) {
     const emp = await findEmployeeCaseInsensitive({ position: "руководитель", department: "тех" });
-    return emp ? { handled: true, text: formatEmployeeInfo(emp) } : { handled: true, text: "Сотрудник не найден." };
+    const result = emp ? { handled: true, text: formatEmployeeInfo(emp) } : { handled: true, text: "Сотрудник не найден." };
+    cache.set(cacheKey, result);
+    return result;
   }
 
   // 2) Если пользователь явно спрашивает "должность" — попытаемся извлечь имя/фамилию
@@ -75,12 +92,16 @@ export async function handleEmployeeQuery(text) {
         });
       }
       if (emp) {
-        return emp.position ? { handled: true, text: `Должность: ${emp.position}` } : { handled: true, text: formatEmployeeInfo(emp) };
+        const result = emp.position ? { handled: true, text: `Должность: ${emp.position}` } : { handled: true, text: formatEmployeeInfo(emp) };
+        cache.set(cacheKey, result);
+        return result;
       }
       // Попробовать частичный поиск по токенам
       const partial = await findEmployeeCaseInsensitive({ firstName, lastName }) ||
                       await findEmployeeCaseInsensitive({ firstName: lastName, lastName: firstName });
-      return partial ? (partial.position ? { handled: true, text: `Должность: ${partial.position}` } : { handled: true, text: formatEmployeeInfo(partial) }) : { handled: true, text: "Сотрудник не найден." };
+      const result = partial ? (partial.position ? { handled: true, text: `Должность: ${partial.position}` } : { handled: true, text: formatEmployeeInfo(partial) }) : { handled: true, text: "Сотрудник не найден." };
+      cache.set(cacheKey, result);
+      return result;
     }
 
     // Если только одно слово (например: "Зорин должность?") — ищем по фамилии/имени
@@ -88,12 +109,15 @@ export async function handleEmployeeQuery(text) {
     if (singleMatch) {
       const token = singleMatch[1];
       const emp = await findByNameTokenCaseInsensitive(token);
-      if (!emp) return { handled: true, text: "Сотрудник не найден." };
-      return emp.position ? { handled: true, text: `Должность: ${emp.position}` } : { handled: true, text: formatEmployeeInfo(emp) };
+      const result = !emp ? { handled: true, text: "Сотрудник не найден." } : (emp.position ? { handled: true, text: `Должность: ${emp.position}` } : { handled: true, text: formatEmployeeInfo(emp) });
+      cache.set(cacheKey, result);
+      return result;
     }
 
     // Не распарсили имя — просим уточнить
-    return { handled: true, text: "Уточните, пожалуйста, о ком вы спрашиваете (например: «Зорин Михаил должность?»)." };
+    const result = { handled: true, text: "Уточните, пожалуйста, о ком вы спрашиваете (например: «Зорин Михаил должность?»)." };
+    cache.set(cacheKey, result, 30000); // Короткий TTL для таких ответов
+    return result;
   }
 
   // 3) Общие вопросы типа "Михаил Зорин" — показать карточку
@@ -110,21 +134,31 @@ export async function handleEmployeeQuery(text) {
         where: { AND: [{ firstName: { equals: lastName } }, { lastName: { equals: firstName } }] } 
       });
     }
-    if (emp) return { handled: true, text: formatEmployeeInfo(emp) };
+    if (emp) {
+      const result = { handled: true, text: formatEmployeeInfo(emp) };
+      cache.set(cacheKey, result);
+      return result;
+    }
     
     // Частичный поиск
     const partial = await findEmployeeCaseInsensitive({ firstName, lastName }) ||
                     await findEmployeeCaseInsensitive({ firstName: lastName, lastName: firstName }) ||
                     await findByNameTokenCaseInsensitive(firstName) ||
                     await findByNameTokenCaseInsensitive(lastName);
-    return partial ? { handled: true, text: formatEmployeeInfo(partial) } : { handled: false, text: "" };
+    const result = partial ? { handled: true, text: formatEmployeeInfo(partial) } : { handled: false, text: "" };
+    if (result.handled) {
+      cache.set(cacheKey, result);
+    }
+    return result;
   }
 
   // 4) По email в тексте
   const email = extractEmailFromText(text);
   if (email) {
     const emp = await findEmployeeCaseInsensitive({ email });
-    return emp ? { handled: true, text: formatEmployeeInfo(emp) } : { handled: true, text: "Сотрудник не найден." };
+    const result = emp ? { handled: true, text: formatEmployeeInfo(emp) } : { handled: true, text: "Сотрудник не найден." };
+    cache.set(cacheKey, result);
+    return result;
   }
 
   // 5) Поиск по отделу/подразделению (только если есть явное упоминание)
@@ -136,7 +170,11 @@ export async function handleEmployeeQuery(text) {
     // Извлекаем название отдела (убираем служебные слова)
     const cleanText = low.replace(/(в|на|по|от|какой|какого|кто)\s+/g, "").trim();
     const emp = await findEmployeeCaseInsensitive({ department: cleanText });
-    if (emp) return { handled: true, text: formatEmployeeInfo(emp) };
+    if (emp) {
+      const result = { handled: true, text: formatEmployeeInfo(emp) };
+      cache.set(cacheKey, result);
+      return result;
+    }
   }
 
     // Если не подошла ни одна сигнатура — не обрабатываем (пусть идёт в OpenAI)
@@ -145,11 +183,10 @@ export async function handleEmployeeQuery(text) {
     return { handled: false, text: "" };
   } catch (err) {
     // Логируем ошибку, но не прерываем выполнение - пусть запрос идет в OpenAI
-    // Используем console.error, так как logger не передается в эту функцию
-    console.error('Error in handleEmployeeQuery:', err);
+    logger.error({ err, text }, 'Error in handleEmployeeQuery');
     // Если ошибка связана с Prisma и mode: "insensitive", это означает, что где-то еще используется старый код
     if (err.message && err.message.includes('mode')) {
-      console.error('⚠️ Обнаружена ошибка с mode: "insensitive". Убедитесь, что приложение перезапущено и используется актуальная версия кода.');
+      logger.warn('⚠️ Обнаружена ошибка с mode: "insensitive". Убедитесь, что приложение перезапущено и используется актуальная версия кода.');
     }
     return { handled: false, text: "" };
   }

@@ -8,40 +8,12 @@ datasource db {
   url      = "file:./dev.db"
 }
 
-model User {
-  id        Int      @id @default(autoincrement())
-  firstName String
-  lastName  String?
-  username  String?  @unique
-  email     String?  @unique
+// Модель для хранения сессий Telegram-бота
+model TelegramSession {
+  id        String   @id // Telegram user ID или chat ID
+  data      String   // JSON данные сессии
+  updatedAt DateTime @default(now()) @updatedAt
   createdAt DateTime @default(now())
-  updatedAt DateTime @updatedAt
-
-  // Связь с заметками
-  notes     Note[]
-  // Связь с сессиями (например, авторизации)
-  sessions  Session[]
-}
-
-model Note {
-  id        Int      @id @default(autoincrement())
-  title     String
-  content   String
-  createdAt DateTime @default(now())
-  updatedAt DateTime @updatedAt
-
-  userId Int
-  user   User @relation(fields: [userId], references: [id])
-}
-
-model Session {
-  id        Int      @id @default(autoincrement())
-  token     String   @unique
-  createdAt DateTime @default(now())
-  expiresAt DateTime
-
-  userId Int
-  user   User @relation(fields: [userId], references: [id])
 }
 
 model Employee {

@@ -1,0 +1,21 @@
+version: '3.8'
+
+services:
+  bot:
+    build: .
+    container_name: navicon-bot
+    restart: unless-stopped
+    env_file:
+      - .env
+    volumes:
+      - ./prisma/dev.db:/app/prisma/dev.db
+      - ./prisma/dev.db-journal:/app/prisma/dev.db-journal
+    environment:
+      - DATABASE_URL=file:./prisma/dev.db
+    healthcheck:
+      test: ["CMD", "node", "-e", "require('http').get('http://localhost:3000/health', (r) => {process.exit(r.statusCode === 200 ? 0 : 1)})"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+

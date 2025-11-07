@@ -5,32 +5,30 @@ import pino from 'pino';
 import prisma from './db/prismaClient.js';
 import { handleEmployeeQuery } from './plugins/employees/employees.service.js';
 import employeesPlugin from './plugins/employees/index.js';
+import config from './config/index.js';
+import { getSession, saveSession } from './services/session.service.js';
+import { rateLimit } from './middleware/rateLimit.js';
+import { getUserFriendlyMessage } from './utils/errors.js';
+import { cleanupOldSessions } from './services/session.service.js';
 
 // Логгер
-const logger = pino({ level: process.env.LOG_LEVEL || 'info' });
-
-// Проверка env
-if (!process.env.TELEGRAM_TOKEN) {
-  logger.error('TELEGRAM_TOKEN missing.');
-  process.exit(1);
-}
-if (!process.env.OPENAI_API_KEY) {
-  logger.error('OPENAI_API_KEY missing.');
-  process.exit(1);
-}
+const logger = pino({ level: config.logging.level });
 
 // Основной объект бота
-const bot = new Telegraf(process.env.TELEGRAM_TOKEN);
-const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
+const bot = new Telegraf(config.telegram.token);
+const openai = new OpenAI({ apiKey: config.openai.apiKey });
 
-// Простая in-memory сессия
-const sessions = new Map();
-bot.use((ctx, next) => {
+// Middleware для сессий из БД
+bot.use(async (ctx, next) => {
   const sid = String(ctx.from?.id || ctx.chat?.id || 'global');
-  if (!sessions.has(sid)) sessions.set(sid, {});
-  ctx.session = sessions.get(sid);
-  return next();
+  ctx.session = await getSession(sid);
+  await next();
+  // Сохраняем сессию после обработки
+  await saveSession(sid, ctx.session || {});
 });
+
+// Rate limiting middleware
+bot.use(rateLimit);
 
 function ensureHistory(ctx) {
   ctx.session = ctx.session || {};
@@ -42,7 +40,11 @@ employeesPlugin(bot, { prisma, logger });
 
 // Команды
 bot.start((ctx) => ctx.reply('Привет! Я бот компании "Навикон". Задай вопрос — я помогу.'));
-bot.command('clear', (ctx) => { ctx.session = {}; ctx.reply('Контекст очищен.'); });
+bot.command('clear', async (ctx) => {
+  ctx.session = {};
+  await saveSession(String(ctx.from?.id || ctx.chat?.id || 'global'), {});
+  await ctx.reply('Контекст очищен.');
+});
 
 // === Основная логика ===
 bot.on('text', async (ctx) => {
@@ -63,26 +65,25 @@ bot.on('text', async (ctx) => {
       ctx.session.history.push({ role: 'user', content: userText });
     }
   
-    // Обрезаем историю...
-    const maxMessages = 10;
+    // Обрезаем историю
+    const maxMessages = config.session.maxHistoryMessages;
     if (ctx.session.history.length > maxMessages * 2) {
       ctx.session.history = ctx.session.history.slice(-maxMessages * 2);
     }
   
     const system = {
       role: 'system',
-      content: process.env.SYSTEM_PROMPT || 'Ты — полезный ассистент. Отвечай по делу, на русском.'
+      content: config.openai.systemPrompt
     };
     const messages = [system, ...ctx.session.history];
-  
+    
     await ctx.sendChatAction('typing');
-  
-    const model = process.env.OPENAI_MODEL || 'gpt-3.5-turbo';
+    
     const completion = await openai.chat.completions.create({
-      model,
+      model: config.openai.model,
       messages,
-      max_tokens: 800,
-      temperature: 0.2
+      max_tokens: config.openai.maxTokens,
+      temperature: config.openai.temperature
     });
   
     const aiMessage = completion?.choices?.[0]?.message?.content?.trim();
@@ -97,18 +98,42 @@ bot.on('text', async (ctx) => {
   
   } catch (err) {
     logger.error({ err }, 'Error in bot.on(text)');
-    await ctx.reply('Ошибка при обработке сообщения.');
+    const userMessage = getUserFriendlyMessage(err);
+    await ctx.reply(userMessage);
   }
 });
 
 // Глобальная обработка ошибок
-bot.catch((err, ctx) => logger.error({ err, ctx }, 'Bot global error'));
+bot.catch(async (err, ctx) => {
+  logger.error({ err, ctx }, 'Bot global error');
+  try {
+    const userMessage = getUserFriendlyMessage(err);
+    await ctx.reply(userMessage);
+  } catch (replyErr) {
+    logger.error({ err: replyErr }, 'Error sending error message to user');
+  }
+});
 
 // Запуск
 (async () => {
   try {
+    // Очистка старых сессий при запуске
+    const cleaned = await cleanupOldSessions();
+    if (cleaned > 0) {
+      logger.info({ cleaned }, 'Cleaned up old sessions');
+    }
+    
     await bot.launch();
     logger.info('Bot started ✅');
+    
+    // Периодическая очистка старых сессий (раз в день)
+    setInterval(async () => {
+      const cleaned = await cleanupOldSessions();
+      if (cleaned > 0) {
+        logger.info({ cleaned }, 'Cleaned up old sessions');
+      }
+    }, 24 * 60 * 60 * 1000);
+    
     process.once('SIGINT', () => bot.stop('SIGINT'));
     process.once('SIGTERM', () => bot.stop('SIGTERM'));
   } catch (err) {

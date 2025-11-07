@@ -1,5 +1,8 @@
 import { validateEmployeeData } from './employee.validator.js';
 import { findEmployeeCaseInsensitive } from './employee-search-helper.js';
+import { requireAdmin } from '../../middleware/auth.js';
+import cache from '../../utils/cache.js';
+import { ValidationError, DatabaseError, getUserFriendlyMessage } from '../../utils/errors.js';
 
 export default function register(bot, { prisma, logger }) {
   // Получаем logger или создаем заглушку
@@ -36,8 +39,8 @@ export default function register(bot, { prisma, logger }) {
     }
   });
 
-  // Команда добавления сотрудника
-  bot.command('addemployee', async (ctx) => {
+  // Команда добавления сотрудника (только для администраторов)
+  bot.command('addemployee', requireAdmin(async (ctx) => {
     try {
       const args = ctx.message.text.split(' ').slice(1);
       
@@ -96,9 +99,8 @@ export default function register(bot, { prisma, logger }) {
       });
 
       if (!validation.valid) {
-        const errorMessage = 'Ошибка валидации данных:\n' + validation.errors.join('\n');
         log.warn({ validation, userId: ctx.from?.id }, 'Employee data validation failed');
-        return ctx.reply(errorMessage);
+        throw new ValidationError('Ошибка валидации данных', validation.errors);
       }
 
       // Проверка на существование сотрудника с таким email (если email указан)
@@ -123,9 +125,20 @@ export default function register(bot, { prisma, logger }) {
       });
 
       log.info({ employeeId: employee.id, userId: ctx.from?.id }, 'Employee created successfully');
+      
+      // Очищаем кэш поиска сотрудников при добавлении нового
+      cache.clear();
+      
       await ctx.reply(`✅ Сотрудник "${firstName} ${lastName}" успешно добавлен.`);
       
     } catch (err) {
+      // Если это уже наша кастомная ошибка, просто пробрасываем дальше
+      if (err instanceof ValidationError) {
+        const errorMessage = 'Ошибка валидации данных:\n' + err.errors.join('\n');
+        await ctx.reply(errorMessage);
+        return;
+      }
+      
       // Обработка специфичных ошибок Prisma
       if (err.code === 'P2002') {
         // Уникальное ограничение нарушено
@@ -134,10 +147,11 @@ export default function register(bot, { prisma, logger }) {
         await ctx.reply(`❌ Сотрудник с такими ${field === 'email' ? 'email' : 'данными'} уже существует.`);
       } else {
         log.error({ err, userId: ctx.from?.id }, 'Error adding employee');
-        await ctx.reply('❌ Ошибка при добавлении сотрудника. Проверьте данные и попробуйте снова.');
+        const userMessage = getUserFriendlyMessage(err instanceof DatabaseError ? err : new DatabaseError('Ошибка при добавлении сотрудника', err));
+        await ctx.reply(userMessage);
       }
     }
-  });
+  }));
 
   log.info('Employees plugin loaded');
 }
