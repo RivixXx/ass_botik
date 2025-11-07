@@ -1,7 +1,7 @@
 export default function register(bot, { prisma }) {
     // Команда для просмотра сотрудников
     bot.command('employees', async (ctx) => {
-      const employees = await prisma.employee.findMany({ orderBy: { name: 'asc' } });
+      const employees = await prisma.employee.findMany({ orderBy: { firstName: 'asc' } });
       if (!employees.length) return ctx.reply('Список сотрудников пуст.');
       const message = employees.map(emp => {
         let s = emp.name;
