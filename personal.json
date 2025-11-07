@@ -1,0 +1,10 @@
+[
+    {
+        "firstName": "Иван",
+        "lastName": "Иванов",
+        "position": "Директор",
+        "email": "ivanov@mail.ru",
+        "phone": "+79161234567"
+    },
+    {}
+]

@@ -45,12 +45,12 @@ model Session {
 }
 
 model Employee {
-  id        Int      @id @default(autoincrement())
-  firstName String
-  lastName  String?
-  position  String?
-  email     String?  @unique
-  phone     String?
-  createdAt DateTime @default(now())
-  updatedAt DateTime @updatedAt
+  id         Int      @id @default(autoincrement())
+  firstName  String
+  lastName   String
+  department String
+  email      String   @unique
+  phone      String?  
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
 }
