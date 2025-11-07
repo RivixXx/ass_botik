@@ -1,4 +1,3 @@
-// src/bot.js
 import 'dotenv/config';
 import { Telegraf } from 'telegraf';
 import OpenAI from 'openai';
@@ -6,7 +5,7 @@ import pino from 'pino';
 import prisma from './db/prismaClient.js';
 
 import employeesPlugin from './plugins/employees/index.js';
-import { listEmployees, employeeDetails } from './plugins/employees/employees.service';
+import { listEmployees, employeeDetails } from './plugins/employees/employees.service.js';
 
 // Логгер
 const logger = pino({ level: process.env.LOG_LEVEL || 'info' });
@@ -56,19 +55,16 @@ bot.command('clear', (ctx) => {
   return ctx.reply('Контекст очищен.');
 });
 
-// bot.command("employees", async (ctx) => {
-//   await listEmployees(ctx);
-// });
+bot.command("employees_inline", async (ctx) => await listEmployees(ctx));
 
-// // Обработчик inline кнопок
-// bot.on("callback_query", async (ctx) => {
-//   const data = ctx.callbackQuery.data;
-//   if (data.startsWith("employee_")) {
-//     const id = parseInt(data.split("_")[1]);
-//     await employeeDetails(ctx, id);
-//     await ctx.answerCbQuery(); // убирает "часики" на кнопке
-//   }
-// });
+bot.on("callback_query", async (ctx) => {
+  const data = ctx.callbackQuery.data;
+  if (data.startsWith("employee_")) {
+    const id = parseInt(data.split("_")[1]);
+    await employeeDetails(ctx, id);
+    await ctx.answerCbQuery();
+  }
+});
 
 // Основная обработка сообщений
 bot.on('text', async (ctx) => {
