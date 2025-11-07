@@ -1,0 +1,57 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+model User {
+  id           Int      @id @default(autoincrement())
+  telegramId   BigInt   @unique
+  name         String?
+  role         String?  // e.g., "admin"
+  createdAt    DateTime @default(now())
+  sessions     Session[]
+  notes        Note[]
+}
+
+model Session {
+  id        Int      @id @default(autoincrement())
+  userId    Int
+  user      User     @relation(fields: [userId], references: [id])
+  context   Json?    // контекст/история диалога (можно хранить последние N сообщений)
+  updatedAt DateTime @updatedAt
+}
+
+model Employee {
+  id            Int      @id @default(autoincrement())
+  name          String
+  telegramId    BigInt?  // если есть личный аккаунт
+  position      String?
+  birthday      DateTime? // хранить дату рождения (год можно не указывать)
+  notes         String?
+  createdAt     DateTime  @default(now())
+}
+
+model Note {
+  id        Int      @id @default(autoincrement())
+  userId    Int
+  title     String?
+  content   String
+  meta      Json?
+  dueAt     DateTime?
+  createdAt DateTime @default(now())
+}
+
+model Reminder {
+  id         Int      @id @default(autoincrement())
+  userId     Int?
+  employeeId Int?
+  type       String   // 'manual'|'calendar'|'birthday'
+  payload    Json
+  runAt      DateTime
+  done       Boolean  @default(false)
+  createdAt  DateTime @default(now())
+}
