@@ -3,6 +3,7 @@ import 'dotenv/config';
 import { Telegraf } from 'telegraf';
 import OpenAI from 'openai';
 import pino from 'pino';
+import prisma from './db/prismaClient.js';
 
 import employeesPlugin from './plugins/employees/index.js';
 

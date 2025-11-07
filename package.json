@@ -12,6 +12,7 @@
   "author": "",
   "license": "ISC",
   "dependencies": {
+    "@prisma/client": "^6.19.0",
     "@telegraf/session": "^2.0.0-beta.7",
     "dotenv": "^17.2.3",
     "nodemon": "^3.1.10",
