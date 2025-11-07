@@ -1,21 +1,17 @@
 // src/plugins/employees/employees.service.js
 import prisma from "../../db/prismaClient.js";
+import { isEmployeeQuery, extractNameFromText, extractEmailFromText } from "./employee-query-detector.js";
 
 /**
- * Возвращает объект сотрудника по условию или строку "Сотрудник не найден."
+ * Формат ответа: { handled: boolean, text: string }
+ * handled = true  -> бот должен ответить text и НЕ вызывать OpenAI
+ * handled = false -> бот не нашёл сигнатуру запроса по БД, можно отправить OpenAI
  */
-export async function getEmployeeInfoRaw(query) {
-  const emp = await prisma.employee.findFirst({ where: query });
-  return emp || null;
-}
 
-/**
- * Формирует читаемый ответ по объекту сотрудника
- */
-export function formatEmployeeInfo(emp) {
-  if (!emp) return "Сотрудник не найден.";
+function formatEmployeeInfo(emp) {
+  if (!emp) return null;
   const parts = [
-    `👤 ${emp.firstName || ''} ${emp.lastName || ''}`.trim(),
+    `👤 ${emp.firstName || ""} ${emp.lastName || ""}`.trim(),
     emp.position ? `📌 Должность: ${emp.position}` : null,
     emp.department ? `🏢 Подразделение: ${emp.department}` : null,
     emp.email ? `✉ E-mail: ${emp.email}` : null,
@@ -25,114 +21,153 @@ export function formatEmployeeInfo(emp) {
   return parts.join("\n");
 }
 
+async function findByNameToken(token) {
+  if (!token) return null;
+  return await prisma.employee.findFirst({
+    where: {
+      OR: [
+        { lastName: { contains: token, mode: "insensitive" } },
+        { firstName: { contains: token, mode: "insensitive" } },
+        { email: { contains: token, mode: "insensitive" } }
+      ]
+    }
+  });
+}
+
 /**
- * Главная функция: принимает текст вопроса, анализирует и возвращает ответ (строку).
+ * Анализ текста и поиск в БД. Возвращает { handled, text }.
+ * Использует централизованный детектор для определения типа запроса.
  */
 export async function handleEmployeeQuery(text) {
   text = String(text || "").trim();
+  if (!text) return { handled: false, text: "" };
 
-  if (!text) return "Пустой запрос.";
+  // Быстрая проверка: если запрос точно не о сотрудниках, сразу возвращаем
+  if (!isEmployeeQuery(text)) {
+    return { handled: false, text: "" };
+  }
 
   const low = text.toLowerCase();
 
-  // 1) Простейшие запросы по должности (ключевые фразы)
+  // Если явно спрашивают о должности / "должность", "должност", "кто по должности"
+  const askPositionKeywords = ["должность", "должност", "кто по должности", "чья должность", "какая должность"];
+  const askPosition = askPositionKeywords.some(k => low.includes(k));
+
+  // 1) Прямые запросы по должности: "кто главный бухгалтер", "кто директор"
   if (low.includes("главный бухгалтер") || low.includes("главбух")) {
-    const emp = await getEmployeeInfoRaw({ position: { contains: "Главный Бухгалтер", mode: "insensitive" } });
-    return formatEmployeeInfo(emp);
+    const emp = await prisma.employee.findFirst({ where: { position: { contains: "главный бухгалтер", mode: "insensitive" } } });
+    return emp ? { handled: true, text: formatEmployeeInfo(emp) } : { handled: true, text: "Сотрудник не найден." };
   }
   if (low.includes("директор")) {
-    const emp = await getEmployeeInfoRaw({ position: { contains: "директор", mode: "insensitive" } });
-    return formatEmployeeInfo(emp);
+    const emp = await prisma.employee.findFirst({ where: { position: { contains: "директор", mode: "insensitive" } } });
+    return emp ? { handled: true, text: formatEmployeeInfo(emp) } : { handled: true, text: "Сотрудник не найден." };
   }
   if (low.includes("руководитель") && low.includes("тех")) {
-    const emp = await getEmployeeInfoRaw({ position: { contains: "руководитель", mode: "insensitive" }, department: { contains: "тех", mode: "insensitive" } });
-    return formatEmployeeInfo(emp);
+    const emp = await prisma.employee.findFirst({ where: { position: { contains: "руководитель", mode: "insensitive" }, department: { contains: "тех", mode: "insensitive" } } });
+    return emp ? { handled: true, text: formatEmployeeInfo(emp) } : { handled: true, text: "Сотрудник не найден." };
   }
 
-  // 2) Если в запросе есть слово "должность" — пытаемся извлечь имя/фамилию и вернуть только должность
-  if (low.includes("должност") || low.includes("должность") || low.includes("кто по должности") || low.includes("должен")) {
-    // Пытаемся найти "Имя Фамилия" в тексте
-    let nameMatch = text.match(/([А-ЯЁA-ЯЁ][а-яёa-яё]+)\s+([А-ЯЁA-ЯЁ][а-яёa-яё]+)/i);
-    if (nameMatch) {
-      const firstName = nameMatch[1];
-      const lastName = nameMatch[2];
-      const emp = await getEmployeeInfoRaw({ firstName: { equals: firstName }, lastName: { equals: lastName } });
-      if (emp && emp.position) return `Должность: ${emp.position}`;
-      if (emp) return formatEmployeeInfo(emp);
-      // попробуем частичный поиск
-      const emp2 = await prisma.employee.findFirst({
+  // 2) Если пользователь явно спрашивает "должность" — попытаемся извлечь имя/фамилию
+  if (askPosition) {
+    // Используем централизованную функцию для извлечения имени
+    const nameData = extractNameFromText(text);
+    if (nameData) {
+      const { firstName, lastName } = nameData;
+      // Сначала точный поиск: Имя Фамилия
+      let emp = await prisma.employee.findFirst({ 
+        where: { firstName: { equals: firstName }, lastName: { equals: lastName } } 
+      });
+      // Если не нашли, пробуем обратный порядок: Фамилия Имя
+      if (!emp) {
+        emp = await prisma.employee.findFirst({ 
+          where: { firstName: { equals: lastName }, lastName: { equals: firstName } } 
+        });
+      }
+      if (emp) {
+        return emp.position ? { handled: true, text: `Должность: ${emp.position}` } : { handled: true, text: formatEmployeeInfo(emp) };
+      }
+      // Попробовать частичный поиск по токенам
+      const partial = await prisma.employee.findFirst({
         where: {
           OR: [
             { firstName: { contains: firstName, mode: "insensitive" } },
-            { lastName: { contains: lastName, mode: "insensitive" } }
+            { lastName: { contains: lastName, mode: "insensitive" } },
+            { firstName: { contains: lastName, mode: "insensitive" } },
+            { lastName: { contains: firstName, mode: "insensitive" } }
           ]
         }
       });
-      return emp2 ? (emp2.position ? `Должность: ${emp2.position}` : formatEmployeeInfo(emp2)) : "Сотрудник не найден.";
+      return partial ? (partial.position ? { handled: true, text: `Должность: ${partial.position}` } : { handled: true, text: formatEmployeeInfo(partial) }) : { handled: true, text: "Сотрудник не найден." };
     }
 
-    // Если найдено только одно слово (вероятно фамилия) — "Зорин должность?"
-    const singleNameMatch = text.match(/([А-ЯЁA-ЯЁ][а-яёa-яё]+)/i);
-    if (singleNameMatch) {
-      const token = singleNameMatch[1];
-      // Поиск по фамилии или имени (contains, case-insensitive)
-      const emp = await prisma.employee.findFirst({
-        where: {
-          OR: [
-            { lastName: { contains: token, mode: "insensitive" } },
-            { firstName: { contains: token, mode: "insensitive" } },
-            { email: { contains: token, mode: "insensitive" } }
-          ]
-        }
-      });
-      if (!emp) return "Сотрудник не найден.";
-      if (emp.position) return `Должность: ${emp.position}`;
-      return formatEmployeeInfo(emp);
+    // Если только одно слово (например: "Зорин должность?") — ищем по фамилии/имени
+    const singleMatch = text.match(/([А-ЯЁA-ЯЁ][а-яёa-яё]+)/i);
+    if (singleMatch) {
+      const token = singleMatch[1];
+      const emp = await findByNameToken(token);
+      if (!emp) return { handled: true, text: "Сотрудник не найден." };
+      return emp.position ? { handled: true, text: `Должность: ${emp.position}` } : { handled: true, text: formatEmployeeInfo(emp) };
     }
 
-    // если не удалось распарсить имя
-    return "Уточните, пожалуйста, о ком именно вы спрашиваете (например: «Зорин Михаил должность?»).";
+    // Не распарсили имя — просим уточнить
+    return { handled: true, text: "Уточните, пожалуйста, о ком вы спрашиваете (например: «Зорин Михаил должность?»)." };
   }
 
-  // 3) Прямой запрос по имени/фамилии: "Михаил Зорин", "Зорин Михаил" и т.д.
-  // ищем шаблоны "Имя Фамилия" или "Фамилия Имя"
-  let nameMatch2 = text.match(/([А-ЯЁA-ЯЁ][а-яёa-яё]+)\s+([А-ЯЁA-ЯЁ][а-яёa-яё]+)/i);
-  if (nameMatch2) {
-    const a = nameMatch2[1];
-    const b = nameMatch2[2];
-    // попробуем оба варианта (Имя Фамилия и Фамилия Имя)
-    let emp = await prisma.employee.findFirst({ where: { AND: [{ firstName: { equals: a } }, { lastName: { equals: b } }] } });
+  // 3) Общие вопросы типа "Михаил Зорин" — показать карточку
+  const nameData = extractNameFromText(text);
+  if (nameData) {
+    const { firstName, lastName } = nameData;
+    // Сначала точный поиск: Имя Фамилия
+    let emp = await prisma.employee.findFirst({ 
+      where: { AND: [{ firstName: { equals: firstName } }, { lastName: { equals: lastName } }] } 
+    });
+    // Если не нашли, пробуем обратный порядок: Фамилия Имя
     if (!emp) {
-      emp = await prisma.employee.findFirst({ where: { AND: [{ firstName: { equals: b } }, { lastName: { equals: a } }] } });
+      emp = await prisma.employee.findFirst({ 
+        where: { AND: [{ firstName: { equals: lastName } }, { lastName: { equals: firstName } }] } 
+      });
     }
-    if (emp) return formatEmployeeInfo(emp);
-    // падение в частичный поиск
+    if (emp) return { handled: true, text: formatEmployeeInfo(emp) };
+    
+    // Частичный поиск
     const partial = await prisma.employee.findFirst({
       where: {
         OR: [
-          { firstName: { contains: a, mode: "insensitive" } },
-          { lastName: { contains: a, mode: "insensitive" } },
-          { firstName: { contains: b, mode: "insensitive" } },
-          { lastName: { contains: b, mode: "insensitive" } }
+          { firstName: { contains: firstName, mode: "insensitive" } },
+          { lastName: { contains: firstName, mode: "insensitive" } },
+          { firstName: { contains: lastName, mode: "insensitive" } },
+          { lastName: { contains: lastName, mode: "insensitive" } }
         ]
       }
     });
-    return partial ? formatEmployeeInfo(partial) : "Сотрудник не найден.";
+    return partial ? { handled: true, text: formatEmployeeInfo(partial) } : { handled: false, text: "" };
   }
 
-  // 4) По e-mail в запросе
-  const emailMatch = text.match(/[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/i);
-  if (emailMatch) {
-    const emp = await prisma.employee.findFirst({ where: { email: { equals: emailMatch[0], mode: "insensitive" } } });
-    return formatEmployeeInfo(emp);
+  // 4) По email в тексте
+  const email = extractEmailFromText(text);
+  if (email) {
+    const emp = await prisma.employee.findFirst({ 
+      where: { email: { equals: email, mode: "insensitive" } } 
+    });
+    return emp ? { handled: true, text: formatEmployeeInfo(emp) } : { handled: true, text: "Сотрудник не найден." };
   }
 
-  // 5) По подразделению (если запрос содержит "отдел" или "подраздел")
-  if (low.includes("отдел") || low.includes("подраздел")) {
-    const emp = await prisma.employee.findFirst({ where: { department: { contains: low.replace(/в|в\s|на\s/g, ""), mode: "insensitive" } } });
-    return formatEmployeeInfo(emp);
+  // 5) Поиск по отделу/подразделению (только если есть явное упоминание)
+  // Более строгая проверка: ищем только при явном указании отдела
+  const departmentKeywords = ["отдел", "подразделение", "бухгалтерия"];
+  const hasDepartmentKeyword = departmentKeywords.some(keyword => low.includes(keyword));
+  
+  if (hasDepartmentKeyword) {
+    // Извлекаем название отдела (убираем служебные слова)
+    const cleanText = low.replace(/(в|на|по|от|какой|какого|кто)\s+/g, "").trim();
+    const emp = await prisma.employee.findFirst({ 
+      where: { department: { contains: cleanText, mode: "insensitive" } } 
+    });
+    if (emp) return { handled: true, text: formatEmployeeInfo(emp) };
   }
 
-  // 6) Фолбек — не нашли сигнатуры для DB, даём подсказку
-  return "Не уверен, что правильно понял запрос. Сформулируйте, пожалуйста: «Имя Фамилия должность?» или «Должность Зорина?»";
+  // Если не подошла ни одна сигнатура — не обрабатываем (пусть идёт в OpenAI)
+  // Это важно: мы уже проверили через isEmployeeQuery, что запрос может относиться к сотрудникам,
+  // но если конкретная информация не найдена, возвращаем handled: false для передачи в AI
+  return { handled: false, text: "" };
 }

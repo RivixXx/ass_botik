@@ -49,39 +49,52 @@ bot.on('text', async (ctx) => {
   try {
     ensureHistory(ctx);
     const userText = ctx.message.text.trim();
-
-    // 1️⃣ Проверяем, не касается ли вопрос сотрудников
-    const employeeKeywords = [
-      'сотрудник', 'бухгалтер', 'директор', 'руководитель', 'отдел', 'почта', 'телефон', 'день рождения'
-    ];
-
-    if (employeeKeywords.some(k => userText.toLowerCase().includes(k))) {
-      const answer = await handleEmployeeQuery(userText);
-      return ctx.reply(answer);
+  
+    // 1) Сначала обработка по БД (сотрудники)
+    const empResult = await handleEmployeeQuery(userText);
+    if (empResult && empResult.handled) {
+      // если handled=true — отвечаем напрямую и возвращаем
+      return ctx.reply(empResult.text);
     }
-
-    // 2️⃣ Если нет — обычный OpenAI-диалог
+  
+    // 2) Если не обработали — идём в OpenAI
+    // салфетка: не добавляем команды в историю
+    if (userText && !userText.startsWith('/')) {
+      ctx.session.history.push({ role: 'user', content: userText });
+    }
+  
+    // Обрезаем историю...
+    const maxMessages = 10;
+    if (ctx.session.history.length > maxMessages * 2) {
+      ctx.session.history = ctx.session.history.slice(-maxMessages * 2);
+    }
+  
     const system = {
       role: 'system',
-      content: 'Ты — полезный корпоративный ассистент компании Навикон. Отвечай кратко, вежливо, на русском языке.',
+      content: process.env.SYSTEM_PROMPT || 'Ты — полезный ассистент. Отвечай по делу, на русском.'
     };
-    const messages = [system, ...ctx.session.history, { role: 'user', content: userText }];
-
+    const messages = [system, ...ctx.session.history];
+  
     await ctx.sendChatAction('typing');
+  
+    const model = process.env.OPENAI_MODEL || 'gpt-3.5-turbo';
     const completion = await openai.chat.completions.create({
-      model: process.env.OPENAI_MODEL || 'gpt-3.5-turbo',
+      model,
       messages,
       max_tokens: 800,
-      temperature: 0.2,
+      temperature: 0.2
     });
-
+  
     const aiMessage = completion?.choices?.[0]?.message?.content?.trim();
-    if (!aiMessage) return ctx.reply('Не получил ответа от AI.');
-
-    ctx.session.history.push({ role: 'user', content: userText });
+    if (!aiMessage) {
+      logger.warn({ completion }, 'Empty response from OpenAI');
+      await ctx.reply('Пустой ответ от AI — попробуй ещё раз позже.');
+      return;
+    }
+  
     ctx.session.history.push({ role: 'assistant', content: aiMessage });
-
     await ctx.reply(aiMessage);
+  
   } catch (err) {
     logger.error({ err }, 'Error in bot.on(text)');
     await ctx.reply('Ошибка при обработке сообщения.');
