@@ -5,7 +5,7 @@ import pino from 'pino';
 import prisma from './db/prismaClient.js';
 
 import employeesPlugin from './plugins/employees/index.js';
-import { listEmployees, employeeDetails } from './plugins/employees/employees.service..js';
+import { listEmployees, employeeDetails } from './plugins/employees/employees.service.js';
 
 // Логгер
 const logger = pino({ level: process.env.LOG_LEVEL || 'info' });
