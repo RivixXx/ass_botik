@@ -4,7 +4,7 @@ import { Telegraf } from 'telegraf';
 import OpenAI from 'openai';
 import pino from 'pino';
 
-import { register as employeesPlugin } from './plugins/employees/index.js';
+import employeesPlugin from './plugins/employees/index.js';
 
 employeesPlugin(bot, { prisma });
 
