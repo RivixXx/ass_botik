@@ -3,29 +3,27 @@ import { Telegraf } from 'telegraf';
 import OpenAI from 'openai';
 import pino from 'pino';
 import prisma from './db/prismaClient.js';
-
+import { handleEmployeeQuery } from './plugins/employees/employees.service.js';
 import employeesPlugin from './plugins/employees/index.js';
-import { listEmployees, employeeDetails } from './plugins/employees/employees.service.js';
 
 // Логгер
 const logger = pino({ level: process.env.LOG_LEVEL || 'info' });
 
-// Проверка переменных окружения
+// Проверка env
 if (!process.env.TELEGRAM_TOKEN) {
-  logger.error('TELEGRAM_TOKEN is missing. Set TELEGRAM_TOKEN in env.');
+  logger.error('TELEGRAM_TOKEN missing.');
   process.exit(1);
 }
 if (!process.env.OPENAI_API_KEY) {
-  logger.error('OPENAI_API_KEY is missing. Set OPENAI_API_KEY in env.');
-  // не выходим — можно запустить бот только для тестов локально; но обычно exit(1)
+  logger.error('OPENAI_API_KEY missing.');
   process.exit(1);
 }
 
+// Основной объект бота
 const bot = new Telegraf(process.env.TELEGRAM_TOKEN);
 const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
 
-// --------- Простейшая гарантированная in-memory сессия ---------
-// Работает в одном процессе. Для продакшна (множественные инстансы) — Redis/Postgres.
+// Простая in-memory сессия
 const sessions = new Map();
 bot.use((ctx, next) => {
   const sid = String(ctx.from?.id || ctx.chat?.id || 'global');
@@ -33,9 +31,7 @@ bot.use((ctx, next) => {
   ctx.session = sessions.get(sid);
   return next();
 });
-// ---------------------------------------------------------------
 
-// Защищённая инициализация истории
 function ensureHistory(ctx) {
   ctx.session = ctx.session || {};
   if (!Array.isArray(ctx.session.history)) ctx.session.history = [];
@@ -45,105 +41,61 @@ function ensureHistory(ctx) {
 employeesPlugin(bot, { prisma });
 
 // Команды
-bot.start((ctx) => {
-  ensureHistory(ctx);
-  return ctx.reply('Привет! Я бот с OpenAI. Напиши мне сообщение — отвечу.');
-});
+bot.start((ctx) => ctx.reply('Привет! Я бот компании "Навикон". Задай вопрос — я помогу.'));
+bot.command('clear', (ctx) => { ctx.session = {}; ctx.reply('Контекст очищен.'); });
 
-bot.command('clear', (ctx) => {
-  ctx.session = {};
-  return ctx.reply('Контекст очищен.');
-});
-
-bot.command("employees_inline", async (ctx) => await listEmployees(ctx));
-
-bot.on("callback_query", async (ctx) => {
-  const data = ctx.callbackQuery.data;
-  if (data.startsWith("employee_")) {
-    const id = parseInt(data.split("_")[1]);
-    await employeeDetails(ctx, id);
-    await ctx.answerCbQuery();
-  }
-});
-
-// Основная обработка сообщений
+// === Основная логика ===
 bot.on('text', async (ctx) => {
   try {
     ensureHistory(ctx);
+    const userText = ctx.message.text.trim();
 
-    const userText = ctx.message.text;
-    // салфетка: не добавляем команды в историю
-    if (userText && !userText.startsWith('/')) {
-      ctx.session.history.push({ role: 'user', content: userText });
+    // 1️⃣ Проверяем, не касается ли вопрос сотрудников
+    const employeeKeywords = [
+      'сотрудник', 'бухгалтер', 'директор', 'руководитель', 'отдел', 'почта', 'телефон', 'день рождения'
+    ];
+
+    if (employeeKeywords.some(k => userText.toLowerCase().includes(k))) {
+      const answer = await handleEmployeeQuery(userText);
+      return ctx.reply(answer);
     }
 
-    // Обрезаем историю: сохраняем последние N сообщений (по ролям)
-    const maxMessages = 10;
-    if (ctx.session.history.length > maxMessages * 2) {
-      ctx.session.history = ctx.session.history.slice(-maxMessages * 2);
-    }
-
-    // Подготовим сообщения для OpenAI
+    // 2️⃣ Если нет — обычный OpenAI-диалог
     const system = {
       role: 'system',
-      content: process.env.SYSTEM_PROMPT || 'Ты — полезный ассистент. Отвечай по делу, на русском.'
+      content: 'Ты — полезный корпоративный ассистент компании Навикон. Отвечай кратко, вежливо, на русском языке.',
     };
-    const messages = [system, ...ctx.session.history];
+    const messages = [system, ...ctx.session.history, { role: 'user', content: userText }];
 
     await ctx.sendChatAction('typing');
-
-    // Вызов OpenAI (адаптируй модель если нужно)
-    const model = process.env.OPENAI_MODEL || 'gpt-3.5-turbo';
-    // Используем стандартный call (согласно openai npm)
     const completion = await openai.chat.completions.create({
-      model,
+      model: process.env.OPENAI_MODEL || 'gpt-3.5-turbo',
       messages,
       max_tokens: 800,
-      temperature: 0.2
+      temperature: 0.2,
     });
 
     const aiMessage = completion?.choices?.[0]?.message?.content?.trim();
-    if (!aiMessage) {
-      logger.warn({ completion }, 'Empty response from OpenAI');
-      await ctx.reply('Пустой ответ от AI — попробуй ещё раз позже.');
-      return;
-    }
+    if (!aiMessage) return ctx.reply('Не получил ответа от AI.');
 
-    // Сохраняем ответ в истории
+    ctx.session.history.push({ role: 'user', content: userText });
     ctx.session.history.push({ role: 'assistant', content: aiMessage });
 
-    // Отправляем ответ (если длинный — Telegram сам разобьёт)
     await ctx.reply(aiMessage);
   } catch (err) {
-    // Логируем всю ошибку
-    logger.error({ err }, 'Error in message handler');
-
-    // Опознаём 403 unsupported_country_region_territory
-    const isUnsupportedRegion =
-      err?.status === 403 ||
-      err?.code === 'unsupported_country_region_territory' ||
-      err?.error?.code === 'unsupported_country_region_territory';
-
-    if (isUnsupportedRegion) {
-      await ctx.reply('Не могу обратиться к OpenAI из этого региона (403 — регион не поддерживается).');
-      return;
-    }
-
-    // Общая обработка ошибок
-    await ctx.reply('Извини, произошла ошибка при обращении к AI. Попробуй позже.');
+    logger.error({ err }, 'Error in bot.on(text)');
+    await ctx.reply('Ошибка при обработке сообщения.');
   }
 });
 
-// Global error handler
-bot.catch((err, ctx) => {
-  logger.error({ err, ctx }, 'Bot global error');
-});
+// Глобальная обработка ошибок
+bot.catch((err, ctx) => logger.error({ err, ctx }, 'Bot global error'));
 
 // Запуск
 (async () => {
   try {
     await bot.launch();
-    logger.info('Bot launched (long polling)');
+    logger.info('Bot started ✅');
     process.once('SIGINT', () => bot.stop('SIGINT'));
     process.once('SIGTERM', () => bot.stop('SIGTERM'));
   } catch (err) {
