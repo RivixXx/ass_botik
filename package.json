@@ -5,8 +5,9 @@
   "description": "",
   "main": "src/bot.js",
   "scripts": {
-    "start": "node src/bot.js",
-    "dev": "nodemon src/bot.js"
+    "start": "npm run prisma:generate && node src/bot.js",
+    "dev": "nodemon src/bot.js",
+    "prisma:generate": "prisma generate"
   },
   "keywords": [],
   "author": "",
