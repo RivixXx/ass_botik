@@ -1,4 +1,5 @@
 import { validateEmployeeData } from './employee.validator.js';
+import { findEmployeeCaseInsensitive } from './employee-search-helper.js';
 
 export default function register(bot, { prisma, logger }) {
   // Получаем logger или создаем заглушку
@@ -102,9 +103,7 @@ export default function register(bot, { prisma, logger }) {
 
       // Проверка на существование сотрудника с таким email (если email указан)
       if (email) {
-        const existing = await prisma.employee.findFirst({
-          where: { email: { equals: email, mode: 'insensitive' } }
-        });
+        const existing = await findEmployeeCaseInsensitive({ email });
         if (existing) {
           log.warn({ email, userId: ctx.from?.id }, 'Attempt to add employee with existing email');
           return ctx.reply(`Сотрудник с email ${email} уже существует.`);

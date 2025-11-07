@@ -1,6 +1,7 @@
 // src/plugins/employees/employees.service.js
 import prisma from "../../db/prismaClient.js";
 import { isEmployeeQuery, extractNameFromText, extractEmailFromText } from "./employee-query-detector.js";
+import { findEmployeeCaseInsensitive, findByNameTokenCaseInsensitive } from "./employee-search-helper.js";
 
 /**
  * Формат ответа: { handled: boolean, text: string }
@@ -21,31 +22,21 @@ function formatEmployeeInfo(emp) {
   return parts.join("\n");
 }
 
-async function findByNameToken(token) {
-  if (!token) return null;
-  return await prisma.employee.findFirst({
-    where: {
-      OR: [
-        { lastName: { contains: token, mode: "insensitive" } },
-        { firstName: { contains: token, mode: "insensitive" } },
-        { email: { contains: token, mode: "insensitive" } }
-      ]
-    }
-  });
-}
+// Удалена функция findByNameToken - используем findByNameTokenCaseInsensitive из helper
 
 /**
  * Анализ текста и поиск в БД. Возвращает { handled, text }.
  * Использует централизованный детектор для определения типа запроса.
  */
 export async function handleEmployeeQuery(text) {
-  text = String(text || "").trim();
-  if (!text) return { handled: false, text: "" };
+  try {
+    text = String(text || "").trim();
+    if (!text) return { handled: false, text: "" };
 
-  // Быстрая проверка: если запрос точно не о сотрудниках, сразу возвращаем
-  if (!isEmployeeQuery(text)) {
-    return { handled: false, text: "" };
-  }
+    // Быстрая проверка: если запрос точно не о сотрудниках, сразу возвращаем
+    if (!isEmployeeQuery(text)) {
+      return { handled: false, text: "" };
+    }
 
   const low = text.toLowerCase();
 
@@ -55,15 +46,15 @@ export async function handleEmployeeQuery(text) {
 
   // 1) Прямые запросы по должности: "кто главный бухгалтер", "кто директор"
   if (low.includes("главный бухгалтер") || low.includes("главбух")) {
-    const emp = await prisma.employee.findFirst({ where: { position: { contains: "главный бухгалтер", mode: "insensitive" } } });
+    const emp = await findEmployeeCaseInsensitive({ position: "главный бухгалтер" });
     return emp ? { handled: true, text: formatEmployeeInfo(emp) } : { handled: true, text: "Сотрудник не найден." };
   }
   if (low.includes("директор")) {
-    const emp = await prisma.employee.findFirst({ where: { position: { contains: "директор", mode: "insensitive" } } });
+    const emp = await findEmployeeCaseInsensitive({ position: "директор" });
     return emp ? { handled: true, text: formatEmployeeInfo(emp) } : { handled: true, text: "Сотрудник не найден." };
   }
   if (low.includes("руководитель") && low.includes("тех")) {
-    const emp = await prisma.employee.findFirst({ where: { position: { contains: "руководитель", mode: "insensitive" }, department: { contains: "тех", mode: "insensitive" } } });
+    const emp = await findEmployeeCaseInsensitive({ position: "руководитель", department: "тех" });
     return emp ? { handled: true, text: formatEmployeeInfo(emp) } : { handled: true, text: "Сотрудник не найден." };
   }
 
@@ -87,16 +78,8 @@ export async function handleEmployeeQuery(text) {
         return emp.position ? { handled: true, text: `Должность: ${emp.position}` } : { handled: true, text: formatEmployeeInfo(emp) };
       }
       // Попробовать частичный поиск по токенам
-      const partial = await prisma.employee.findFirst({
-        where: {
-          OR: [
-            { firstName: { contains: firstName, mode: "insensitive" } },
-            { lastName: { contains: lastName, mode: "insensitive" } },
-            { firstName: { contains: lastName, mode: "insensitive" } },
-            { lastName: { contains: firstName, mode: "insensitive" } }
-          ]
-        }
-      });
+      const partial = await findEmployeeCaseInsensitive({ firstName, lastName }) ||
+                      await findEmployeeCaseInsensitive({ firstName: lastName, lastName: firstName });
       return partial ? (partial.position ? { handled: true, text: `Должность: ${partial.position}` } : { handled: true, text: formatEmployeeInfo(partial) }) : { handled: true, text: "Сотрудник не найден." };
     }
 
@@ -104,7 +87,7 @@ export async function handleEmployeeQuery(text) {
     const singleMatch = text.match(/([А-ЯЁA-ЯЁ][а-яёa-яё]+)/i);
     if (singleMatch) {
       const token = singleMatch[1];
-      const emp = await findByNameToken(token);
+      const emp = await findByNameTokenCaseInsensitive(token);
       if (!emp) return { handled: true, text: "Сотрудник не найден." };
       return emp.position ? { handled: true, text: `Должность: ${emp.position}` } : { handled: true, text: formatEmployeeInfo(emp) };
     }
@@ -130,25 +113,17 @@ export async function handleEmployeeQuery(text) {
     if (emp) return { handled: true, text: formatEmployeeInfo(emp) };
     
     // Частичный поиск
-    const partial = await prisma.employee.findFirst({
-      where: {
-        OR: [
-          { firstName: { contains: firstName, mode: "insensitive" } },
-          { lastName: { contains: firstName, mode: "insensitive" } },
-          { firstName: { contains: lastName, mode: "insensitive" } },
-          { lastName: { contains: lastName, mode: "insensitive" } }
-        ]
-      }
-    });
+    const partial = await findEmployeeCaseInsensitive({ firstName, lastName }) ||
+                    await findEmployeeCaseInsensitive({ firstName: lastName, lastName: firstName }) ||
+                    await findByNameTokenCaseInsensitive(firstName) ||
+                    await findByNameTokenCaseInsensitive(lastName);
     return partial ? { handled: true, text: formatEmployeeInfo(partial) } : { handled: false, text: "" };
   }
 
   // 4) По email в тексте
   const email = extractEmailFromText(text);
   if (email) {
-    const emp = await prisma.employee.findFirst({ 
-      where: { email: { equals: email, mode: "insensitive" } } 
-    });
+    const emp = await findEmployeeCaseInsensitive({ email });
     return emp ? { handled: true, text: formatEmployeeInfo(emp) } : { handled: true, text: "Сотрудник не найден." };
   }
 
@@ -160,14 +135,22 @@ export async function handleEmployeeQuery(text) {
   if (hasDepartmentKeyword) {
     // Извлекаем название отдела (убираем служебные слова)
     const cleanText = low.replace(/(в|на|по|от|какой|какого|кто)\s+/g, "").trim();
-    const emp = await prisma.employee.findFirst({ 
-      where: { department: { contains: cleanText, mode: "insensitive" } } 
-    });
+    const emp = await findEmployeeCaseInsensitive({ department: cleanText });
     if (emp) return { handled: true, text: formatEmployeeInfo(emp) };
   }
 
-  // Если не подошла ни одна сигнатура — не обрабатываем (пусть идёт в OpenAI)
-  // Это важно: мы уже проверили через isEmployeeQuery, что запрос может относиться к сотрудникам,
-  // но если конкретная информация не найдена, возвращаем handled: false для передачи в AI
-  return { handled: false, text: "" };
+    // Если не подошла ни одна сигнатура — не обрабатываем (пусть идёт в OpenAI)
+    // Это важно: мы уже проверили через isEmployeeQuery, что запрос может относиться к сотрудникам,
+    // но если конкретная информация не найдена, возвращаем handled: false для передачи в AI
+    return { handled: false, text: "" };
+  } catch (err) {
+    // Логируем ошибку, но не прерываем выполнение - пусть запрос идет в OpenAI
+    // Используем console.error, так как logger не передается в эту функцию
+    console.error('Error in handleEmployeeQuery:', err);
+    // Если ошибка связана с Prisma и mode: "insensitive", это означает, что где-то еще используется старый код
+    if (err.message && err.message.includes('mode')) {
+      console.error('⚠️ Обнаружена ошибка с mode: "insensitive". Убедитесь, что приложение перезапущено и используется актуальная версия кода.');
+    }
+    return { handled: false, text: "" };
+  }
 }
